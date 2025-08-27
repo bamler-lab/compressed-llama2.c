@@ -35,6 +35,7 @@ runfast: run.c
 runomp: run.c
 	$(CC) -Ofast -fopenmp -march=native run.c  -lm  -o run
 	$(CC) -Ofast -fopenmp -march=native runq.c  -lm  -o runq
+	$(CC) -Ofast -fopenmp -march=native runc.c  -lm  -o runc
 
 .PHONY: win64
 win64:

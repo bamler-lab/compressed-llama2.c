@@ -139,6 +139,34 @@ OMP_NUM_THREADS=64 ./runq llama2_7b_q80.bin -n 40
 
 This runs 40 steps just to get a timing. The float32 version for me runs at 4.6 tok/s, and the int8 version at 14 tok/s. So we achieved a 3X speedup while reducing the checkpoint size by 4X. However, the forward pass is quantized to int8, and therefore silently very slightly lower quality.
 
+## Compression
+
+This fork extends the original implementation of llama2.c by an executable `runc` that can load compressed models.
+The corresponding encoder is implemented in `export.py` with the `--version 3` switch, similar to the `--version 2` switch for quantized models discussed above.
+
+Here's how to test inference in a compressed model (it's similar to inference in a _quantized_ model, except that we need to export the model with `--version 3` instead of `--version 2`, and we then have to run inference with `runc` rather than `runq`).
+
+1. Download a model checkpoint (`.pt` file) from the [tinyllamas collection on Huggingface](https://huggingface.co/karpathy/tinyllamas/tree/main).
+   We'll assume here that you download the model to `./models/stories110.pt`.
+2. Create a virtual environment for python 3.11 and activate it.
+3. Install required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Compress the model you downloaded in Step 1 (this will take a while but should display progress bars):
+   ```bash
+   python export.py models/stories110M_Q4_0C.bin --version 3 --checkpoint models/stories110M.pt
+   ```
+5. Compile the inference program (with OpenMP parallelization):
+   ```bash
+   make runomp
+   ```
+6. Run inference (set `<NUM_HTREADS>`, e.g., to 4 or 8):
+   ```bash
+   OMP_NUM_THREADS=<NUM_THREADS> ./runc models/stories110M_Q4_0C.bin -n 40
+   ```
+   
+
 ## huggingface models
 
 We can load any huggingface models that use the Llama 2 architecture. See the script [export.py](export.py) and the `--hf` flag to export the model .bin file.

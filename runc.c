@@ -40,9 +40,19 @@ typedef struct
 
 typedef struct
 {
-    int8_t *q; // quantized values
-    float *s;  // scaling factors
-} QuantizedTensor;
+    uint8_t left_cumulative;
+    uint8_t probability;
+    int8_t value;
+    int8_t padding;
+} PpfEntry;
+
+typedef struct
+{
+    uint32_t *offsets;    // offsets into the compressed bitstream for each matrix row (for random access)
+    float *s;             // scaling factors
+    PpfEntry *ppf;        // PPF for quantiles 0 to 255 inclusively
+    uint16_t *compressed; // compressed bitstream
+} CompressedTensor;
 
 typedef struct
 {
@@ -54,14 +64,14 @@ typedef struct
     float *rms_att_weight; // (layer, dim) rmsnorm weights
     float *rms_ffn_weight; // (layer, dim)
     // weights for matmuls. note dim == n_heads * head_size
-    QuantizedTensor *wq; // (layer, dim, n_heads * head_size)
-    QuantizedTensor *wk; // (layer, dim, n_kv_heads * head_size)
-    QuantizedTensor *wv; // (layer, dim, n_kv_heads * head_size)
-    QuantizedTensor *wo; // (layer, n_heads * head_size, dim)
+    CompressedTensor *wq; // (layer, dim, n_heads * head_size)
+    CompressedTensor *wk; // (layer, dim, n_kv_heads * head_size)
+    CompressedTensor *wv; // (layer, dim, n_kv_heads * head_size)
+    CompressedTensor *wo; // (layer, n_heads * head_size, dim)
     // weights for ffn
-    QuantizedTensor *w1; // (layer, hidden_dim, dim)
-    QuantizedTensor *w2; // (layer, dim, hidden_dim)
-    QuantizedTensor *w3; // (layer, hidden_dim, dim)
+    CompressedTensor *w1; // (layer, hidden_dim, dim)
+    CompressedTensor *w2; // (layer, dim, hidden_dim)
+    CompressedTensor *w3; // (layer, hidden_dim, dim)
     // final rmsnorm
     float *rms_final_weight; // (dim,)
     // (optional) classifier weights for the logits, on the last layer
@@ -207,6 +217,51 @@ QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each)
     return res;
 }
 
+/* initialize `n` x quantized tensor (with `out_dim_each * in_dim_each` elements), starting from memory pointed at *ptr */
+CompressedTensor *init_compressed_matrices(void **ptr, int n, int in_dim_each, int out_dim_each)
+{
+    int size_each = in_dim_each * out_dim_each;
+    void *p = *ptr;
+    CompressedTensor *res = malloc(n * sizeof(CompressedTensor));
+    for (int i = 0; i < n; i++)
+    {
+        res[i].offsets = (uint32_t *)p;
+        p = (uint32_t *)p + (out_dim_each + 1);
+        uint32_t num_compressed_words = res[i].offsets[out_dim_each];
+        res[i].s = (float *)p;
+        p = (float *)p + size_each / GS;
+        res[i].ppf = (PpfEntry *)p;
+        p = (PpfEntry *)p + 256;
+        res[i].compressed = (uint16_t *)p;
+        p = (uint16_t *)p + num_compressed_words;
+
+        // printf("Initialized compressed matrix %d with shape (%d, %d), %u compressed words\n", i, out_dim_each, in_dim_each, num_compressed_words);
+        // for (int j = 0; j < 256; j++)
+        // {
+        //     printf("  ppf[%d] = (left_cumulative=%u, value=%d, prob=%d)\n", j, res[i].ppf[j].left_cumulative, res[i].ppf[j].value, res[i].ppf[j].probability);
+        // }
+        // for (int j = 0; j < size_each / GS; j++)
+        // {
+        //     printf("  scales[%d] = %f\n", j, res[i].s[j]);
+        // }
+        // for (int j = out_dim_each - 10; j < out_dim_each + 1; j++)
+        // {
+        //     printf("  offsets[%d] = %u\n", j, res[i].offsets[j]);
+        // }
+        // for (int j = 0; j < 3; j++)
+        // {
+        //     printf("  compressed[%d] = %u\n", j, res[i].compressed[j]);
+        // }
+        // for (int j = num_compressed_words - 3; j < num_compressed_words; j++)
+        // {
+        //     printf("  compressed[%d] = %u\n", j, res[i].compressed[j]);
+        // }
+        // printf("\n");
+    }
+    *ptr = p; // advance ptr to current position
+    return res;
+}
+
 void memory_map_weights(TransformerWeights *w, Config *p, void *ptr, uint8_t shared_classifier)
 {
     int head_size = p->dim / p->n_heads;
@@ -226,16 +281,17 @@ void memory_map_weights(TransformerWeights *w, Config *p, void *ptr, uint8_t sha
     w->token_embedding_table = malloc(p->vocab_size * p->dim * sizeof(float));
     dequantize(w->q_tokens, w->token_embedding_table, p->vocab_size * p->dim);
 
-    w->wq = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_heads * head_size));
-    w->wk = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size));
-    w->wv = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size));
-    w->wo = init_quantized_tensors(&ptr, p->n_layers, (p->n_heads * head_size) * p->dim);
+    w->wq = init_compressed_matrices(&ptr, p->n_layers, p->dim, p->n_heads * head_size);
+    w->wk = init_compressed_matrices(&ptr, p->n_layers, p->dim, p->n_kv_heads * head_size);
+    w->wv = init_compressed_matrices(&ptr, p->n_layers, p->dim, p->n_kv_heads * head_size);
+    w->wo = init_compressed_matrices(&ptr, p->n_layers, p->n_heads * head_size, p->dim);
 
-    w->w1 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim);
-    w->w2 = init_quantized_tensors(&ptr, p->n_layers, p->hidden_dim * p->dim);
-    w->w3 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim);
+    w->w1 = init_compressed_matrices(&ptr, p->n_layers, p->dim, p->hidden_dim);
+    w->w2 = init_compressed_matrices(&ptr, p->n_layers, p->hidden_dim, p->dim);
+    w->w3 = init_compressed_matrices(&ptr, p->n_layers, p->dim, p->hidden_dim);
 
-    w->wcls = shared_classifier ? w->q_tokens : init_quantized_tensors(&ptr, 1, p->dim * p->vocab_size);
+    // w->wcls = shared_classifier ? w->q_tokens : init_compressed_matrices(&ptr, 1, p->dim, p->vocab_size);
+    w->wcls = w->q_tokens;
 }
 
 void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weights,
@@ -264,7 +320,7 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     {
         exit(EXIT_FAILURE);
     }
-    if (version != 2)
+    if (version != 3)
     {
         fprintf(stderr, "Bad version %d, need version 2\n", version);
         exit(EXIT_FAILURE);
@@ -279,6 +335,11 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     uint8_t shared_classifier; // a byte to indicate if the classifier is shared
     if (fread(&shared_classifier, sizeof(uint8_t), 1, file) != 1)
     {
+        exit(EXIT_FAILURE);
+    }
+    if (shared_classifier != 1)
+    {
+        fprintf(stderr, "Compressed models currently only implemented with shared classifier\n");
         exit(EXIT_FAILURE);
     }
     int group_size; // the group size used in quantization
@@ -391,7 +452,61 @@ void softmax(float *x, int size)
     }
 }
 
-void matmul(float *xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d)
+void matmul(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
+{
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    // inputs to this function are both quantized
+
+    int i;
+#pragma omp parallel for private(i)
+    for (i = 0; i < d; i++)
+    {
+        float val = 0.0f;
+        int32_t ival = 0;
+        int in = i * n;
+
+        // initialize ANS entropy (de-)coder
+        uint32_t read_pos = w->offsets[i];
+        uint32_t coder_state = w->compressed[read_pos++];
+        coder_state = (coder_state << 16) | w->compressed[read_pos++];
+
+        // do the matmul in groups of GS
+        int j;
+        for (j = 0; j <= n - GS; j += GS)
+        {
+            for (int k = 0; k < GS; k++)
+            {
+                uint8_t quantile = coder_state & 0xFF;
+                coder_state >>= 8;
+                PpfEntry ppf_entry = w->ppf[quantile];
+                uint32_t remainder = quantile - ppf_entry.left_cumulative;
+                coder_state = coder_state * ppf_entry.probability + remainder;
+
+                // if (i == 0 && j == 0)
+                // {
+                //     printf(
+                //         "k=%d, val=%d, quantile=%u, left_cumulative=%u, probability=%u, remainder=%u\n",
+                //         k, ppf_entry.value, quantile, ppf_entry.left_cumulative, ppf_entry.probability, remainder);
+                // }
+
+                ival += ((int32_t)x->q[j + k]) * ((int32_t)ppf_entry.value);
+
+                if (coder_state >> 16 == 0)
+                {
+                    coder_state = (coder_state << 16) | w->compressed[read_pos++];
+                }
+            }
+            val += ((float)ival) * w->s[(in + j) / GS] * x->s[j / GS];
+            ival = 0;
+        }
+
+        xout[i] = val;
+    }
+}
+
+// TODO: remove this function once shared classifier is fully implemented
+void matmul_uncompressed(float *xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d)
 {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
@@ -569,7 +684,7 @@ float *forward(Transformer *transformer, int token, int pos)
 
     // classifier into logits
     quantize(&s->xq, x, dim);
-    matmul(s->logits, &s->xq, w->wcls, dim, p->vocab_size);
+    matmul_uncompressed(s->logits, &s->xq, w->wcls, dim, p->vocab_size);
     return s->logits;
 }
 
@@ -888,11 +1003,11 @@ int sample_mult(float *probabilities, int n, float coin)
 {
     // sample index from probabilities (they must sum to 1!)
     // coin is a random number in [0, 1), usually from random_f32()
-    float cdf = 0.0f;
+    float ppf = 0.0f;
     for (int i = 0; i < n; i++)
     {
-        cdf += probabilities[i];
-        if (coin < cdf)
+        ppf += probabilities[i];
+        if (coin < ppf)
         {
             return i;
         }
@@ -949,11 +1064,11 @@ int sample_topp(float *probabilities, int n, float topp, ProbIndex *probindex, f
 
     // sample from the truncated list
     float r = coin * cumulative_prob;
-    float cdf = 0.0f;
+    float ppf = 0.0f;
     for (int i = 0; i <= last_idx; i++)
     {
-        cdf += probindex[i].prob;
-        if (r < cdf)
+        ppf += probindex[i].prob;
+        if (r < ppf)
         {
             return probindex[i].index;
         }
