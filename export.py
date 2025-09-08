@@ -170,14 +170,14 @@ def compress(w, group_size, max_abs_value=7):
         dim=1)
 
     # Compress each row using ANS
-    compressed = ArrayVector(dtype=np.uint16)
-    buf = np.empty((in_dim // 2 + 3,), dtype=np.uint16)
+    compressed = ArrayVector(dtype=np.uint32)
+    buf = np.empty((in_dim // 2 + 3,), dtype=np.uint32)
     offsets = np.empty((out_dim + 1,), dtype=np.uint32)
     for i in tqdm(range(out_dim)):
         offsets[i] = compressed.size
         # Initialize coder state (smallest value that still ensures that the
         # decoder won't read beyond the end of the compressed data).
-        coder_state = 1 << 16
+        coder_state = 1 << 32
         buf_pos = 0
         for j in reversed(range(in_dim)):
             index = q[i, j].item() + max_abs_value
@@ -185,26 +185,27 @@ def compress(w, group_size, max_abs_value=7):
             right_cumulative = cdf[index + 1].item()
             probability = right_cumulative - left_cumulative
 
-            if (coder_state >> 24) >= probability:
-                buf[buf_pos] = coder_state & 0xFFFF
+            # 64 - precision = 64 - 8 = 56
+            if (coder_state >> 56) >= probability:
+                buf[buf_pos] = coder_state & 0xFFFFFFFF
                 buf_pos += 1
-                coder_state >>= 16
+                coder_state >>= 32
 
             quantile = left_cumulative + coder_state % probability
             # if coder_state < (1 << 16):
             #     raise ValueError("Coder state is too small")
             coder_state = ((coder_state // probability) << 8) | quantile
-            if coder_state < (1 << 16):
+            if coder_state < (1 << 32):
                 print(
                     f"i={i}, j={j}, val={q[i,j].item()}, left_cumulative={left_cumulative}, right_cumulative={right_cumulative}, probability={probability}, quantile={quantile}")
                 raise ValueError("Coder state is too small after update")
 
         # print(f"Final coder state for row {i}: {coder_state}")
         # Flush final coder state.
-        buf[buf_pos] = coder_state & 0xFFFF
+        buf[buf_pos] = coder_state & 0xFFFFFFFF
         buf_pos += 1
-        coder_state >>= 16
-        buf[buf_pos] = coder_state & 0xFFFF
+        coder_state >>= 32
+        buf[buf_pos] = coder_state & 0xFFFFFFFF
         buf_pos += 1
 
         compressed.append(buf[buf_pos - 1::-1])  # Reverse to get correct order
@@ -501,7 +502,8 @@ def version3_export(model, filepath, group_size=64):
             serialize_uint32(out_file, offsets)
             serialize_fp32(out_file, s)
             serialize_int8(out_file, ppf)  # always a multiple of 4 bytes
-            serialize_uint16(out_file, compressed)
+            # serialize_uint16(out_file, compressed)
+            serialize_uint32(out_file, compressed)
             print(
                 f"{i+1}/{len(weights)} quantized and compressed {tuple(w.shape)} to Q4_0C with max error {err} and entropy {entropy} bit")
 

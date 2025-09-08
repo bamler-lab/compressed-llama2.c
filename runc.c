@@ -51,7 +51,7 @@ typedef struct
     uint32_t *offsets;    // offsets into the compressed bitstream for each matrix row (for random access)
     float *s;             // scaling factors
     PpfEntry *ppf;        // PPF for quantiles 0 to 255 inclusively
-    uint16_t *compressed; // compressed bitstream
+    uint32_t *compressed; // compressed bitstream
 } CompressedTensor;
 
 typedef struct
@@ -232,8 +232,8 @@ CompressedTensor *init_compressed_matrices(void **ptr, int n, int in_dim_each, i
         p = (float *)p + size_each / GS;
         res[i].ppf = (PpfEntry *)p;
         p = (PpfEntry *)p + 256;
-        res[i].compressed = (uint16_t *)p;
-        p = (uint16_t *)p + num_compressed_words;
+        res[i].compressed = (uint32_t *)p;
+        p = (uint32_t *)p + num_compressed_words;
 
         // printf("Initialized compressed matrix %d with shape (%d, %d), %u compressed words\n", i, out_dim_each, in_dim_each, num_compressed_words);
         // for (int j = 0; j < 256; j++)
@@ -468,8 +468,8 @@ void matmul(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
 
         // initialize ANS entropy (de-)coder
         uint32_t read_pos = w->offsets[i];
-        uint32_t coder_state = w->compressed[read_pos++];
-        coder_state = (coder_state << 16) | w->compressed[read_pos++];
+        uint64_t coder_state = w->compressed[read_pos++];
+        coder_state = (coder_state << 32) | w->compressed[read_pos++];
 
         // do the matmul in groups of GS
         int j;
@@ -480,7 +480,7 @@ void matmul(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
                 uint8_t quantile = coder_state & 0xFF;
                 coder_state >>= 8;
                 PpfEntry ppf_entry = w->ppf[quantile];
-                uint32_t remainder = quantile - ppf_entry.left_cumulative;
+                uint64_t remainder = quantile - ppf_entry.left_cumulative;
                 coder_state = coder_state * ppf_entry.probability + remainder;
 
                 // if (i == 0 && j == 0)
@@ -492,9 +492,9 @@ void matmul(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
 
                 ival += ((int32_t)x->q[j + k]) * ((int32_t)ppf_entry.value);
 
-                if (coder_state >> 16 == 0)
+                if (coder_state >> 32 == 0)
                 {
-                    coder_state = (coder_state << 16) | w->compressed[read_pos++];
+                    coder_state = (coder_state << 32) | w->compressed[read_pos++];
                 }
             }
             val += ((float)ival) * w->s[(in + j) / GS] * x->s[j / GS];
