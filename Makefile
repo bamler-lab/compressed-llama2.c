@@ -7,12 +7,14 @@ CC = gcc
 run: run.c
 	$(CC) -O3 -o run run.c -lm
 	$(CC) -O3 -o runq runq.c -lm
+	$(CC) -O3 -o runc runc.c -lm
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
 # $ valgrind --leak-check=full ./run out/model.bin -n 3
 rundebug: run.c
 	$(CC) -g -o run run.c -lm
 	$(CC) -g -o runq runq.c -lm
+	$(CC) -g -o runc runc.c -lm
 
 # https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
 # https://simonbyrne.github.io/notes/fastmath/
@@ -27,6 +29,7 @@ rundebug: run.c
 runfast: run.c
 	$(CC) -Ofast -o run run.c -lm
 	$(CC) -Ofast -o runq runq.c -lm
+	$(CC) -Ofast -o runc runc.c -lm
 
 # additionally compiles with OpenMP, allowing multithreaded runs
 # make sure to also enable multiple threads when running, e.g.:
@@ -47,11 +50,13 @@ win64:
 rungnu:
 	$(CC) -Ofast -std=gnu11 -o run run.c -lm
 	$(CC) -Ofast -std=gnu11 -o runq runq.c -lm
+	$(CC) -Ofast -std=gnu11 -o runc runc.c -lm
 
 .PHONY: runompgnu
 runompgnu:
 	$(CC) -Ofast -fopenmp -std=gnu11 run.c  -lm  -o run
 	$(CC) -Ofast -fopenmp -std=gnu11 runq.c  -lm  -o runq
+	$(CC) -Ofast -fopenmp -std=gnu11 runc.c  -lm  -o runc
 
 # run all tests
 .PHONY: test
@@ -75,3 +80,4 @@ testcc:
 clean:
 	rm -f run
 	rm -f runq
+	rm -f runc
