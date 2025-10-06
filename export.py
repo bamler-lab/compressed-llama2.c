@@ -179,22 +179,32 @@ def compress(w, group_size, max_abs_value=7):
         # decoder won't read beyond the end of the compressed data).
         coder_state = 1 << 32
         buf_pos = 0
-        for j in reversed(range(in_dim)):
-            index = q[i, j].item() + max_abs_value
-            left_cumulative = cdf[index].item()
-            right_cumulative = cdf[index + 1].item()
-            probability = right_cumulative - left_cumulative
+        for j in reversed(range(0,in_dim,4)):
+            indices = q[i, j:j+4].numpy()[::-1] + max_abs_value
+            left_cumulatives = cdf[indices]
+            right_cumulatives = cdf[indices + 1]
+            probabilities = right_cumulatives - left_cumulatives
+            
+            total_prob = torch.prod(probabilities).item()
 
-            # 64 - precision = 64 - 8 = 56
-            if (coder_state >> 56) >= probability:
+            # 64 - 4* precision = 64 - 4*8 = 32
+            if (coder_state >> 32) >= total_prob:
                 buf[buf_pos] = coder_state & 0xFFFFFFFF
                 buf_pos += 1
                 coder_state >>= 32
 
-            quantile = left_cumulative + coder_state % probability
-            # if coder_state < (1 << 16):
-            #     raise ValueError("Coder state is too small")
-            coder_state = ((coder_state // probability) << 8) | quantile
+
+
+            concat = 0
+            for l, (prob, left_cum) in enumerate(zip(probabilities, left_cumulatives)):
+                remainder = coder_state % prob.item()
+                coder_state //= prob.item()
+                quantile = left_cum.item() + remainder
+                concat |= quantile << (l * 8)
+
+            coder_state = (coder_state << 32) | concat
+
+
             if coder_state < (1 << 32):
                 print(
                     f"i={i}, j={j}, val={q[i,j].item()}, left_cumulative={left_cumulative}, right_cumulative={right_cumulative}, probability={probability}, quantile={quantile}")

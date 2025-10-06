@@ -472,16 +472,100 @@ void matmul(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
         coder_state = (coder_state << 32) | w->compressed[read_pos++];
 
         // do the matmul in groups of GS
+
         int j;
         for (j = 0; j <= n - GS; j += GS)
         {
-            for (int k = 0; k < GS; k++)
+            for (int k = 0; k < GS; k+=4)
             {
-                uint8_t quantile = coder_state & 0xFF;
-                coder_state >>= 8;
-                PpfEntry ppf_entry = w->ppf[quantile];
-                uint64_t remainder = quantile - ppf_entry.left_cumulative;
-                coder_state = coder_state * ppf_entry.probability + remainder;
+                uint32_t quantiles =  (uint32_t)(coder_state & 0xFFFFFFFF);
+                coder_state >>= 32;
+                uint8_t q[4] = {
+                 quantiles & 0xFF,
+                 (quantiles>>8) & 0xFF,
+                 (quantiles>>16) & 0xFF,
+                 (quantiles>>24) & 0xFF
+                };
+                #pragma unroll(4)
+                for (int m=3; m>=0; m--){
+                    PpfEntry ppf_entry = w->ppf[q[m]];
+                    uint64_t r = q[m] - ppf_entry.left_cumulative;
+                    coder_state = coder_state*ppf_entry.probability + r;
+                    ival += (int32_t) x->q[j + k + (3 - m)] * (int32_t) ppf_entry.value;
+                }
+
+
+                if ((coder_state >> 32) == 0)
+                {
+                    coder_state = (coder_state << 32) | w->compressed[read_pos++];
+                }
+            }
+            val += ((float)ival) * w->s[(in + j) / GS] * x->s[j / GS];
+            ival = 0;
+        }
+
+        xout[i] = val;
+    }
+}
+void matmuluglygully(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
+{
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    // inputs to this function are both quantized
+
+    int i;
+#pragma omp parallel for private(i)
+    for (i = 0; i < d; i++)
+    {
+        float val = 0.0f;
+        int32_t ival = 0;
+        int in = i * n;
+
+        // initialize ANS entropy (de-)coder
+        uint32_t read_pos = w->offsets[i];
+        uint64_t coder_state = w->compressed[read_pos++];
+        coder_state = (coder_state << 32) | w->compressed[read_pos++];
+
+        // do the matmul in groups of GS
+        uint8_t quantile0;
+        uint8_t quantile1;        
+        uint8_t quantile2;
+        uint8_t quantile3;        
+        PpfEntry ppf_entry0;
+        PpfEntry ppf_entry1;        
+        PpfEntry ppf_entry2;
+        PpfEntry ppf_entry3;        
+        uint64_t remainder0;
+        uint64_t remainder1;        
+        uint64_t remainder2;
+        uint64_t remainder3;
+
+
+        int j;
+        for (j = 0; j <= n - GS; j += GS)
+        {
+            for (int k = 0; k < GS; k+=4)
+            {
+                quantile0 = coder_state & 0xFF;
+                quantile1 = (coder_state>>8) & 0xFF;
+                quantile2 = (coder_state>>16) & 0xFF;
+                quantile3 = (coder_state>>24) & 0xFF;
+                coder_state >>= 32;
+
+                ppf_entry0 = w->ppf[quantile0];
+                ppf_entry1 = w->ppf[quantile1];
+                ppf_entry2 = w->ppf[quantile2];
+                ppf_entry3 = w->ppf[quantile3];
+                remainder0 = quantile0 - ppf_entry0.left_cumulative;
+                remainder1 = quantile1 - ppf_entry1.left_cumulative;
+                remainder2 = quantile2 - ppf_entry2.left_cumulative;
+                remainder3 = quantile3 - ppf_entry3.left_cumulative;
+
+
+                coder_state = (((coder_state * ppf_entry3.probability + remainder3)
+                                             * ppf_entry2.probability + remainder2)
+                                             * ppf_entry1.probability + remainder1)
+                                             * ppf_entry0.probability + remainder0;
 
                 // if (i == 0 && j == 0)
                 // {
@@ -490,7 +574,12 @@ void matmul(float *xout, QuantizedTensor *x, CompressedTensor *w, int n, int d)
                 //         k, ppf_entry.value, quantile, ppf_entry.left_cumulative, ppf_entry.probability, remainder);
                 // }
 
-                ival += ((int32_t)x->q[j + k]) * ((int32_t)ppf_entry.value);
+
+                ival += ((int32_t)x->q[j + k ])    * ((int32_t)ppf_entry3.value);
+                ival += ((int32_t)x->q[j + k + 1]) * ((int32_t)ppf_entry2.value);
+                ival += ((int32_t)x->q[j + k + 2]) * ((int32_t)ppf_entry1.value);
+                ival += ((int32_t)x->q[j + k + 3]) * ((int32_t)ppf_entry0.value);
+
 
                 if (coder_state >> 32 == 0)
                 {
