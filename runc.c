@@ -322,7 +322,7 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     }
     if (version != 3)
     {
-        fprintf(stderr, "Bad version %d, need version 2\n", version);
+        fprintf(stderr, "Bad version %d, need version 3\n", version);
         exit(EXIT_FAILURE);
     }
     int header_size = 256; // the header size for version 2 in bytes
